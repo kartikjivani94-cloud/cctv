@@ -1,0 +1,52 @@
+services:
+  # ---------- FastAPI application (API + auto-prepare) ----------
+  app:
+    build: .
+    image: cctv-live-feed:latest
+    container_name: cctv-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WORKERS: "${WORKERS:-4}"
+      VIDEOS_DIR: /data/videos
+      LIBRARY_CACHE_FILE: /data/cache/library.json
+    volumes:
+      - ./videos:/data/videos
+      - ./cache:/data/cache
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "${APP_CPUS:-4.0}"
+          memory: "${APP_MEM:-2G}"
+
+  # ---------- nginx reverse proxy + static file server ----------
+  nginx:
+    image: nginx:1-alpine
+    container_name: cctv-nginx
+    restart: unless-stopped
+    ports:
+      - "${LISTEN_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./app/static:/app/app/static:ro
+      - ./videos:/data/videos:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "${NGINX_CPUS:-2.0}"
+          memory: "${NGINX_MEM:-512M}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

@@ -1,0 +1,28 @@
+# --- Environment & secrets ---
+.env
+
+# --- Videos and generated data (never commit) ---
+videos/
+cache/
+
+# --- Python ---
+*.pyc
+*.pyo
+__pycache__/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+
+# --- Logs ---
+*.log
+
+# --- macOS ---
+.DS_Store
+
+# --- Editor ---
+.vscode/
+.idea/
+*.swp

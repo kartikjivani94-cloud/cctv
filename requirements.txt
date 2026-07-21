@@ -1,0 +1,7 @@
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+gunicorn>=23.0.0
+pydantic>=2.10
+pydantic-settings>=2.7
+# Used by the test client (starlette TestClient); not required at runtime.
+httpx>=0.28.1

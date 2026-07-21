@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CCTV Feed</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="player-page">
+    <div class="player-stage">
+      <video id="video" playsinline muted preload="auto"></video>
+
+      <div class="osd osd-top-left">
+        <div id="osdName">Camera</div>
+        <div class="loc" id="osdLoc"></div>
+      </div>
+      <div class="osd osd-top-right"><span class="rec"></span> REC</div>
+      <div class="osd osd-bottom-right" id="osdTime">--:--:--</div>
+      <div class="osd osd-bottom-left" id="osdDate"></div>
+
+      <div class="overlay-msg" id="overlay">
+        <div class="spinner" id="spinner"></div>
+        <div class="big" id="overlayBig"></div>
+        <div class="sub" id="overlaySub"></div>
+      </div>
+    </div>
+    <div class="player-bar">
+      <a class="back" href="/">&larr; Back to control room</a>
+      <div class="clock" id="statusLine"></div>
+    </div>
+  </div>
+  <script src="/static/vendor/hls.min.js"></script>
+  <script src="/static/camera.js"></script>
+</body>
+</html>
