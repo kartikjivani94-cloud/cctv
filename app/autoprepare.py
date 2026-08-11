@@ -47,19 +47,19 @@ def _moov_at_front(path: Path, scan: int = 4_000_000) -> bool:
     return pm != -1 and (pd == -1 or pm < pd)
 
 
-def _duration_of(path: Path) -> Optional[float]:
-    out = subprocess.run(
-        [FFPROBE, "-v", "error", "-show_entries", "format=duration",
-         "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True,
-    )
+def _duration_of(path: Path, input_format: str = "") -> Optional[float]:
+    cmd = [FFPROBE, "-v", "error"]
+    if input_format:
+        cmd += ["-f", input_format]
+    cmd += ["-show_entries", "format=duration", "-of", "csv=p=0", str(path)]
+    out = subprocess.run(cmd, capture_output=True, text=True)
     try:
         return float(out.stdout.strip())
     except (ValueError, AttributeError):
         return None
 
 
-def _validate(src: Path, out: Path, remux: bool) -> bool:
+def _validate(src: Path, out: Path, remux: bool, src_format: str = "") -> bool:
     try:
         if not out.exists() or out.stat().st_size < 4096:
             return False
@@ -68,7 +68,7 @@ def _validate(src: Path, out: Path, remux: bool) -> bool:
     out_dur = _duration_of(out)
     if not out_dur:
         return False
-    src_dur = _duration_of(src)
+    src_dur = _duration_of(src, src_format)
     if src_dur:
         # For remux the duration must match tightly (stream copy, no frame drops).
         # For transcode, corrupted sources may drop many frames so allow a wider
@@ -249,24 +249,30 @@ class AutoPreparer:
         if processed.exists():
             return processed
 
-        # Source is already web-safe H.264 MP4/MOV?
-        if cam.video_codec == "h264" and container_ext in {"mp4", "m4v", "mov"}:
-            if not _moov_at_front(src):
-                self._set(cam.id, "remuxing", "Fixing moov atom position…")
-                ok = self._faststart_inplace(cam.id, src)
-                if not ok:
-                    return None
-            return src
+        fmt = cam.input_format
 
-        # H.264 in non-web container → lossless remux to MP4.
+        # A file needing a forced demuxer has an invalid container, so it must
+        # always be rebuilt into a real MP4 rather than served or patched in place.
+        if not fmt:
+            # Source is already web-safe H.264 MP4/MOV?
+            if cam.video_codec == "h264" and container_ext in {"mp4", "m4v", "mov"}:
+                if not _moov_at_front(src):
+                    self._set(cam.id, "remuxing", "Fixing moov atom position…")
+                    ok = self._faststart_inplace(cam.id, src)
+                    if not ok:
+                        return None
+                return src
+
+        # H.264 elementary stream → lossless remux into a proper MP4.
         if cam.video_codec == "h264":
             self._set(cam.id, "remuxing", "Remuxing to MP4…")
-            return self._convert(cam.id, src, processed, remux=True)
+            return self._convert(cam.id, src, processed, remux=True, src_format=fmt)
 
         # Other codec (HEVC, etc.) → transcode to H.264.
         if cam.needs_prepare:
             self._set(cam.id, "transcoding", "Transcoding to H.264 MP4…")
-            return self._convert(cam.id, src, processed, remux=False, hw=hw)
+            return self._convert(cam.id, src, processed, remux=False, hw=hw,
+                                 src_format=fmt)
 
         # Servable via progressive (shouldn't reach here, but safe fallback).
         return cam.serve_path
@@ -287,14 +293,18 @@ class AutoPreparer:
         return False
 
     def _convert(self, cam_id: str, src: Path, dst: Path,
-                 remux: bool, hw: bool = False) -> Optional[Path]:
+                 remux: bool, hw: bool = False, src_format: str = "") -> Optional[Path]:
         tmp = dst.with_suffix(".tmp.mp4")
         tmp.unlink(missing_ok=True)
 
+        # Forces the demuxer for sources whose container declares the wrong codec.
+        fmt_in = ["-f", src_format] if src_format else []
+
         if remux:
-            cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-                   "-i", str(src), "-map", "0:v:0", "-map", "0:a?", "-sn",
-                   "-c", "copy", "-movflags", "+faststart", str(tmp)]
+            cmd = ([FFMPEG, "-hide_banner", "-loglevel", "error", "-y"]
+                   + fmt_in
+                   + ["-i", str(src), "-map", "0:v:0", "-map", "0:a?", "-sn",
+                      "-c", "copy", "-movflags", "+faststart", str(tmp)])
         else:
             # Always use libx264 (software) for HEVC transcoding: NVR/DVR HEVC
             # streams often have broken reference frames that h264_videotoolbox
@@ -306,15 +316,16 @@ class AutoPreparer:
             # tolerate HEVC bitstream errors common in NVR/DVR exports.
             cmd = ([FFMPEG, "-hide_banner", "-loglevel", "warning", "-y",
                     "-fflags", "+discardcorrupt+genpts+igndts",
-                    "-err_detect", "ignore_err",
-                    "-i", str(src),
-                    "-map", "0:v:0", "-map", "0:a?", "-sn",
-                    "-max_muxing_queue_size", "9999"]
+                    "-err_detect", "ignore_err"]
+                   + fmt_in
+                   + ["-i", str(src),
+                      "-map", "0:v:0", "-map", "0:a?", "-sn",
+                      "-max_muxing_queue_size", "9999"]
                    + enc + ["-c:a", "aac", "-b:a", "128k",
                              "-movflags", "+faststart", str(tmp)])
 
         r = subprocess.run(cmd, capture_output=True)
-        if r.returncode == 0 and _validate(src, tmp, remux=remux):
+        if r.returncode == 0 and _validate(src, tmp, remux=remux, src_format=src_format):
             tmp.replace(dst)
             logger.info("AutoPrepare: camera %s -> %s", cam_id, dst.name)
             return dst

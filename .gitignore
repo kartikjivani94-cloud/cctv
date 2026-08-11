@@ -4,6 +4,9 @@
 # --- Videos and generated data (never commit) ---
 videos/
 cache/
+*.rar
+*.zip
+*.7z
 
 # --- Python ---
 *.pyc

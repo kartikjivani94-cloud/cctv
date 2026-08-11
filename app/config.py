@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     video_extensions: str = DEFAULT_VIDEO_EXTENSIONS
     library_cache_file: str = "./cache/library.json"
     ffprobe_bin: str = "ffprobe"
+    ffmpeg_bin: str = "ffmpeg"
 
     # --- Feed timing (two 12h slots per day) ---------------------------------
     timezone: str = "Asia/Kolkata"

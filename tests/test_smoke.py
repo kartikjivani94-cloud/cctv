@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.library import Camera, clean_location, slugify
+from app.library import Camera, _is_web_safe, _Probe, clean_location, slugify
 from app.routes import router
 from app.streaming import parse_range
 from app.timefeed import FeedClock
@@ -67,6 +67,26 @@ def test_helpers():
     print("HELPERS_OK (slugify + location cleaning)")
 
 
+def test_web_safe_requires_real_decodability():
+    """A container that lies about its codec must not be served directly.
+
+    Some DVR exports wrap an HEVC elementary stream in an MP4 whose sample
+    description claims 'avc1'. It probes as playable h264/mp4 but no decoder
+    can read it, so it has to be repaired instead of streamed as-is.
+    """
+    genuine = _Probe("h264", "mov,mp4", 60.0)
+    assert _is_web_safe("mp4", genuine)
+
+    # Undecodable despite advertising a browser-friendly codec.
+    lying = _Probe("h264", "mov,mp4", 60.0, decodable=False)
+    assert not _is_web_safe("mp4", lying)
+
+    # Readable only via a forced demuxer, so the container itself is invalid.
+    recovered = _Probe("h264", "mov,mp4", 60.0, input_format="h264")
+    assert not _is_web_safe("mp4", recovered)
+    print("DECODABILITY_OK (mislabeled containers rejected)")
+
+
 def test_range_parsing():
     assert parse_range(None, 1000) == (0, 999)
     assert parse_range("bytes=0-99", 1000) == (0, 99)
@@ -116,6 +136,7 @@ def test_routes():
 if __name__ == "__main__":
     test_time_alignment()
     test_helpers()
+    test_web_safe_requires_real_decodability()
     test_range_parsing()
     test_routes()
     print("ALL_OK")

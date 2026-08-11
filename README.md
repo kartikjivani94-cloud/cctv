@@ -53,6 +53,28 @@ scripts/run.sh
 # Cameras go live on the dashboard as each finishes.
 ```
 
+## Supported Formats
+
+Containers: `.mp4` `.m4v` `.mov` `.mkv` `.avi` `.webm` (case-insensitive).  
+Codecs: H.264 is served as-is; HEVC/H.265 and anything else is transcoded to H.264.
+
+### Malformed DVR/NVR exports
+
+Some recorders write a raw elementary stream into a container that declares the
+wrong codec — for example an HEVC stream inside an MP4 whose sample description
+claims `avc1`. Such a file probes as ordinary H.264/MP4 but **no decoder can read
+it**, so metadata alone cannot be trusted.
+
+On first scan every file is therefore decode-verified: if no frame can be decoded
+through normal container parsing, each fallback demuxer (`hevc`, `h264`, `mpegts`,
+`mpeg4`) is tried until one yields a frame. The working demuxer is recorded and
+forced via `ffmpeg -f` for all later conversions, and the file is rebuilt into a
+valid MP4 before segmenting. The true duration is taken from the repaired file,
+since the original container's value is often wrong too.
+
+Results are cached (keyed by path, size and mtime), so the verification cost is
+paid once per file, not on every restart.
+
 ## Production Deployment (Docker)
 
 ```bash

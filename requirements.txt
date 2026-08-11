@@ -5,3 +5,4 @@ pydantic>=2.10
 pydantic-settings>=2.7
 # Used by the test client (starlette TestClient); not required at runtime.
 httpx>=0.28.1
+pytest>=8.0

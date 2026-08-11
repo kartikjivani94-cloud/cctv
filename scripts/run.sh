@@ -22,7 +22,13 @@ fi
 
 echo "Starting CCTV server: ${WORKERS} workers on ${HOST}:${PORT}"
 
-exec gunicorn app.main:app \
+# Prefer the project virtualenv so the script works without activating it first.
+GUNICORN="gunicorn"
+if [ -x ".venv/bin/gunicorn" ]; then
+  GUNICORN=".venv/bin/gunicorn"
+fi
+
+exec "${GUNICORN}" app.main:app \
   -c gunicorn.conf.py \
   -k uvicorn.workers.UvicornWorker \
   --workers "${WORKERS}" \
