@@ -52,6 +52,21 @@ class Settings(BaseSettings):
     stream_chunk_size: int = 2 * 1024 * 1024  # 2 MiB read unit for range responses
     read_threads: int = 128  # thread-pool for blocking I/O (file reads, ffprobe)
 
+    # --- RTSP live gateway (MediaMTX) ----------------------------------------
+    # Files are published with ffmpeg -re so AI clients get a genuine live
+    # RTP/RTSP edge (monotonic PTS at native FPS) instead of an HTTP MP4.
+    rtsp_enabled: bool = True
+    rtsp_publish_url: str = "rtsp://127.0.0.1:8554"  # ffmpeg publish target
+    rtsp_public_host: str = "auto"  # advertised host; "auto" = request Host
+    rtsp_port: int = 8554
+    webrtc_port: int = 8889
+    hls_live_port: int = 8888
+    hls_live_origin: str = "http://127.0.0.1:8888"  # MediaMTX HLS (proxied at /live/)
+    hls_live_via_proxy: bool = True
+    rtsp_path_prefix: str = "stream"
+    rtsp_transport: str = "tcp"  # ffmpeg publish transport (tcp is NAT-safe)
+
+
     # --- Server / sharing ----------------------------------------------------
     host: str = "0.0.0.0"
     port: int = 8000

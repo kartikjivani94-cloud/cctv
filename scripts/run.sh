@@ -22,6 +22,18 @@ fi
 
 echo "Starting CCTV server: ${WORKERS} workers on ${HOST}:${PORT}"
 
+if [ "${RTSP_ENABLED:-true}" = "true" ]; then
+  if command -v nc >/dev/null && nc -z 127.0.0.1 8554 2>/dev/null; then
+    echo "MediaMTX already listening on :8554"
+  else
+    echo "Starting MediaMTX (RTSP :8554, HLS :8888, WebRTC :8889)"
+    mkdir -p cache
+    chmod +x scripts/start_mediamtx.sh
+    scripts/start_mediamtx.sh >./cache/mediamtx.log 2>&1 &
+    sleep 1
+  fi
+fi
+
 # Prefer the project virtualenv so the script works without activating it first.
 GUNICORN="gunicorn"
 if [ -x ".venv/bin/gunicorn" ]; then

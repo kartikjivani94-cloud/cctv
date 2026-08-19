@@ -9,6 +9,7 @@ const osdName = document.getElementById("osdName");
 const osdLoc = document.getElementById("osdLoc");
 const osdTime = document.getElementById("osdTime");
 const osdDate = document.getElementById("osdDate");
+const ingestLine = document.getElementById("ingestLine");
 const statusLine = document.getElementById("statusLine");
 
 let feed = null;
@@ -68,34 +69,66 @@ function tickOsd() {
 }
 
 let hls = null;
+let liveHlsFailed = false;
 
 function seekToLiveAndPlay() {
   try { video.currentTime = expectedOffset(); } catch (e) {}
   video.play().catch(() => showOverlay("PAUSED", "Tap anywhere to start the live feed.", false));
 }
 
+function playFromLiveEdge() {
+  video.play().catch(() => showOverlay("PAUSED", "Tap anywhere to start the live feed.", false));
+}
+
+function startLiveHls(url, live) {
+  if (hls) { hls.destroy(); hls = null; }
+  hls = new Hls(live ? {
+    liveSyncDurationCount: 2,
+    liveMaxLatencyDurationCount: 6,
+    liveDurationInfinity: true,
+    lowLatencyMode: true,
+    maxBufferLength: 8,
+    maxMaxBufferLength: 20,
+  } : {
+    maxBufferLength: 60,
+    maxMaxBufferLength: 600,
+    backBufferLength: 60,
+    startPosition: expectedOffset(),
+    lowLatencyMode: false,
+  });
+  hls.loadSource(url);
+  hls.attachMedia(video);
+  hls.on(Hls.Events.MANIFEST_PARSED, live ? playFromLiveEdge : seekToLiveAndPlay);
+  hls.on(Hls.Events.ERROR, (evt, data) => {
+    if (!data.fatal) return;
+    if (live) {
+      liveHlsFailed = true;
+      if (hls) { hls.destroy(); hls = null; }
+      startLive();
+      return;
+    }
+    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+    else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+    else { hls.destroy(); hls = null; setTimeout(init, 2000); }
+  });
+}
+
 function startLive() {
-  // Preferred path: HLS (segmented) for gap-free continuous playback.
+  // Preferred path: MediaMTX live HLS (real-time, no byte-range seeking).
+  if (feed.hls_live_url && window.Hls && window.Hls.isSupported() && !liveHlsFailed) {
+    startLiveHls(feed.hls_live_url, true);
+    return;
+  }
+  // Native live HLS (Safari / iOS).
+  if (feed.hls_live_url && video.canPlayType("application/vnd.apple.mpegurl") && !liveHlsFailed) {
+    video.src = feed.hls_live_url;
+    video.addEventListener("loadedmetadata", playFromLiveEdge, { once: true });
+    return;
+  }
+  // VOD HLS (segmented files) for gap-free continuous playback when the
+  // live gateway is down.
   if (feed.hls_url && window.Hls && window.Hls.isSupported()) {
-    if (hls) { hls.destroy(); hls = null; }
-    hls = new Hls({
-      // Buffer minutes ahead (local disk is fast) so it can never run dry.
-      maxBufferLength: 60,
-      maxMaxBufferLength: 600,
-      backBufferLength: 60,
-      startPosition: expectedOffset(),
-      lowLatencyMode: false,
-    });
-    hls.loadSource(feed.hls_url);
-    hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, seekToLiveAndPlay);
-    hls.on(Hls.Events.ERROR, (evt, data) => {
-      if (!data.fatal) return;
-      // Recover from transient media/network errors without blanking the feed.
-      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-      else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-      else { hls.destroy(); hls = null; setTimeout(init, 2000); }
-    });
+    startLiveHls(feed.hls_url, false);
     return;
   }
   // Native HLS (Safari / iOS).
@@ -121,6 +154,8 @@ const HARD_RESYNC = 30.0;    // s: only a real desync forces a seek
 
 function syncPlayback() {
   if (!feed || feed.status !== "live") return;
+  // Live RTSP/HLS is already the wall-clock edge; do not seek inside it.
+  if (feed.hls_live_url && !liveHlsFailed) return;
   // Never fight the buffer: skip while paused, seeking, or starved of data.
   if (video.paused || video.seeking || video.readyState < 3) return;
 
@@ -144,6 +179,12 @@ function applyMeta() {
   osdName.textContent = feed.name || `Camera ${camId}`;
   osdLoc.textContent = feed.location || "";
   document.title = `${feed.name || "Camera " + camId} - CCTV Feed`;
+  if (ingestLine) {
+    ingestLine.textContent = feed.rtsp_url || "";
+    ingestLine.title = feed.rtsp_url
+      ? `AI ingest: ${feed.rtsp_url}`
+      : "";
+  }
 }
 
 async function fetchState() {
@@ -152,6 +193,7 @@ async function fetchState() {
 }
 
 async function init() {
+  liveHlsFailed = false;
   try {
     feed = await fetchState();
     fetchedAtMs = Date.now();

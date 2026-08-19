@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
+from .rtsp import advertised_urls, public_host_from_request, publish_path
 from .streaming import guess_content_type, parse_range, stream_file
 
 logger = logging.getLogger("cctv.routes")
@@ -14,6 +15,36 @@ logger = logging.getLogger("cctv.routes")
 STATIC_DIR = Path(__file__).parent / "static"
 
 router = APIRouter()
+
+
+def _public_host(request: Request) -> str:
+    return public_host_from_request(
+        request.headers.get("host"),
+        request.app.state.settings.rtsp_public_host,
+    )
+
+
+def _live_urls(cam_id: str, request: Request) -> dict:
+    settings = request.app.state.settings
+    return advertised_urls(
+        cam_id,
+        public_host=_public_host(request),
+        rtsp_port=settings.rtsp_port,
+        webrtc_port=settings.webrtc_port,
+        path_prefix=settings.rtsp_path_prefix,
+        hls_via_proxy=settings.hls_live_via_proxy,
+    )
+
+
+def _is_rtsp_live(cam_id: str, request: Request) -> bool:
+    gw = getattr(request.app.state, "rtsp", None)
+    if gw is not None and gw.is_publishing(cam_id):
+        return True
+    settings = request.app.state.settings
+    if not getattr(settings, "rtsp_enabled", False):
+        return False
+    cam = request.app.state.cameras_by_id.get(cam_id)
+    return cam is not None and publish_path(cam) is not None
 
 
 @router.get("/")
@@ -42,7 +73,33 @@ async def prepare_status(request: Request) -> JSONResponse:
 
 @router.get("/api/cameras")
 async def list_cameras(request: Request) -> JSONResponse:
-    cameras = [cam.public() for cam in request.app.state.cameras]
+    cameras = []
+    for cam in request.app.state.cameras:
+        pub = cam.public()
+        if _is_rtsp_live(cam.id, request):
+            pub["delivery"] = "rtsp"
+            pub.update(_live_urls(cam.id, request))
+        cameras.append(pub)
+    return JSONResponse({"cameras": cameras})
+
+
+@router.get("/api/ingest")
+async def ingest_catalog(request: Request) -> JSONResponse:
+    """RTSP/WebRTC/HLS endpoints for AI inference clients and dashboards."""
+    cameras = []
+    for cam in request.app.state.cameras:
+        if not cam.servable and not _is_rtsp_live(cam.id, request):
+            continue
+        entry = {
+            "id": cam.id,
+            "number": cam.number,
+            "name": cam.name,
+            "location": cam.location,
+            "codec": cam.video_codec,
+            "live": _is_rtsp_live(cam.id, request),
+            **_live_urls(cam.id, request),
+        }
+        cameras.append(entry)
     return JSONResponse({"cameras": cameras})
 
 
@@ -66,6 +123,9 @@ async def camera_state(cam_id: str, request: Request) -> JSONResponse:
         "drift_tolerance": state.settings.drift_tolerance_seconds,
         **feed.to_dict(),
     }
+    if _is_rtsp_live(cam.id, request):
+        payload["delivery"] = "rtsp"
+        payload.update(_live_urls(cam.id, request))
     return JSONResponse(payload)
 
 
@@ -116,4 +176,36 @@ async def stream(cam_id: str, request: Request):
         stream_file(path, start, end, state.settings.stream_chunk_size),
         status_code=status_code,
         headers=headers,
+    )
+
+
+@router.api_route("/live/{path:path}", methods=["GET", "HEAD"])
+async def live_hls_proxy(path: str, request: Request):
+    """Proxy MediaMTX live HLS so the dashboard can play same-origin."""
+    origin = request.app.state.settings.hls_live_origin.rstrip("/")
+    url = f"{origin}/{path}"
+    client = getattr(request.app.state, "http", None)
+    if client is None:
+        raise HTTPException(status_code=502, detail="Live gateway client not ready")
+    headers = {}
+    if request.headers.get("range"):
+        headers["Range"] = request.headers["range"]
+    try:
+        upstream = await client.request(request.method, url, headers=headers)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Live HLS proxy failed for %s: %s", url, exc)
+        raise HTTPException(status_code=502, detail="Live gateway unavailable") from exc
+    out_headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-cache",
+    }
+    content_type = upstream.headers.get("content-type", "application/octet-stream")
+    if "content-range" in upstream.headers:
+        out_headers["Content-Range"] = upstream.headers["content-range"]
+        out_headers["Accept-Ranges"] = "bytes"
+    return Response(
+        content=upstream.content if request.method != "HEAD" else b"",
+        status_code=upstream.status_code,
+        headers=out_headers,
+        media_type=content_type,
     )

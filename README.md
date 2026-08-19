@@ -1,34 +1,30 @@
 # CCTV Live-Feed Simulator
 
-Serves pre-recorded CCTV videos as time-aligned live feeds via HLS.  
-Drop video files into `videos/`, start the server — cameras appear on the dashboard
-and videos are automatically converted and segmented in the background.
+Serves pre-recorded CCTV videos as **time-aligned live RTSP feeds** (plus HLS/WebRTC for browsers).  
+Drop video files into `videos/`, start the server — each file is published with ffmpeg `-re` so 1 second of video takes 1 second to stream.
 
 ## Architecture
 
 ```
-                  ┌─────────────────────────────────┐
-  Users ──────►   │          nginx (:80)             │
-  (200+)          │  ┌─────────┐  ┌───────────────┐  │
-                  │  │ /hls/*  │  │ /api/* /stream │  │
-                  │  │ sendfile│  │ proxy_pass ──► │──┼──► gunicorn + uvicorn (:8000)
-                  │  │ (zero   │  │               │  │    4+ async workers
-                  │  │  copy)  │  └───────────────┘  │    auto-prepare thread
-                  │  └─────────┘                     │
-                  └─────────────────────────────────┘
-                         │
-                   videos/hls/<slug>/*.ts   ← pre-segmented, never re-encoded at runtime
+  AI clients (OpenCV / GStreamer / DeepStream)
+          │  rtsp://<host>:8554/stream/<id>
+          ▼
+  ┌───────────────────────────────────────────┐
+  │              MediaMTX                      │
+  │   RTSP :8554   WebRTC :8889   HLS :8888   │
+  └────────────────▲──────────────────────────┘
+                   │ ffmpeg -re -stream_loop -1 -c copy
+                   │ (one publisher per camera)
+                   │
+            videos/*.mp4  (H.264 / H.265)
+
+  Browsers ──► nginx :80
+                 /           dashboard + API
+                 /live/*     MediaMTX live HLS (real-time)
+                 /hls/*      VOD segments (fallback)
 ```
 
-**Key design for 200+ concurrent users at original quality:**
-
-- **nginx serves all HLS segments** (`.ts` files, `.m3u8` playlists) directly from disk
-  via `sendfile()` — zero-copy, zero Python, zero CPU per viewer.
-- **No runtime transcoding** — all conversion happens once at startup (background thread).
-  Segments are lossless stream-copies of the source (`-c copy`), preserving original quality.
-- **gunicorn** handles only lightweight API calls (camera state, dashboard HTML).
-  With 4 workers it can sustain thousands of JSON responses/second.
-- **HLS with hls.js** on the client ensures gap-free, buffer-ahead playback.
+**Why RTSP instead of HTTP MP4:** pulling a progressive MP4 over byte-ranges lets a client burst through 12 hours of frames in minutes, which breaks Kalman filters, ByteTrack, and latency benchmarks. `-re` enforces native framerate; MediaMTX then fans the same live path out as RTSP (AI ingest), WebRTC, and low-latency HLS (dashboards).
 
 ## Quick Start (bare metal)
 
@@ -42,21 +38,34 @@ pip install -r requirements.txt
 # 3. Copy and edit config
 cp .env.example .env
 
-# 4. Start the server (auto-detects CPU count for workers)
-scripts/run.sh
+# 4. Convert videos to H.264 MP4 (writes videos/processed/<slug>.mp4)
+python scripts/convert_to_h264.py
 
-# On first start, videos are automatically:
-#   H.264 MP4 → faststart remux (instant)
-#   H.264 MKV/AVI → remux to MP4 (seconds)
-#   HEVC/other → transcode to H.264 (minutes-hours)
-#   All → HLS segments (seconds-minutes)
-# Cameras go live on the dashboard as each finishes.
+# 5. Start MediaMTX + the API (auto-detects CPU count for workers)
+scripts/run.sh
 ```
+
+On first start, videos are prepared in the background (remux / transcode / HLS fallback). Each servable camera is published to `rtsp://localhost:8554/stream/<id>`.
+
+### AI / inference ingest
+
+```python
+import cv2
+cap = cv2.VideoCapture("rtsp://<host>:8554/stream/1")
+```
+
+```bash
+ffplay -rtsp_transport tcp rtsp://localhost:8554/stream/1
+# catalog of every live endpoint:
+curl -s http://localhost:8000/api/ingest
+```
+
+OpenCV, GStreamer (`rtspsrc`), FFmpeg, and NVIDIA DeepStream can all open those RTSP URLs. Browser dashboards use live HLS at `/live/stream/<id>/index.m3u8` (or WebRTC on port 8889).
 
 ## Supported Formats
 
 Containers: `.mp4` `.m4v` `.mov` `.mkv` `.avi` `.webm` (case-insensitive).  
-Codecs: H.264 is served as-is; HEVC/H.265 and anything else is transcoded to H.264.
+Codecs: H.264 and H.265 are stream-copied into RTSP (`-c copy`); anything else is transcoded to H.264 for the browser fallback. HEVC cameras stay HEVC on the RTSP path.
 
 ### Malformed DVR/NVR exports
 
@@ -89,6 +98,7 @@ cp .env.example .env
 docker compose up -d --build
 
 # The dashboard is at http://<server-ip>/
+# RTSP ingest (OpenCV / DeepStream): rtsp://<server-ip>:8554/stream/<id>
 # nginx listens on port 80 (override with LISTEN_PORT in .env)
 ```
 
@@ -96,13 +106,13 @@ docker compose up -d --build
 
 | Component | Role | Default | Tuning |
 |-----------|------|---------|--------|
-| nginx | Serve HLS segments (sendfile) | auto workers | Handles 10,000+ concurrent connections out of the box |
-| gunicorn | API endpoints only | 4 workers | Set `WORKERS=2×CPU` in `.env`; each worker handles ~500 req/s |
-| Thread pool | Progressive stream fallback | 128 threads | `READ_THREADS` in `.env` |
+| MediaMTX | Live RTSP / WebRTC / HLS fan-out | 1 container | One publisher process per camera (`-c copy`, cheap) |
+| nginx | Dashboard, API proxy, live HLS proxy | auto workers | Handles 10,000+ concurrent connections |
+| gunicorn | API endpoints only | 4 workers | Set `WORKERS=2×CPU` in `.env` |
 
 **Bandwidth math:** 12 cameras × 200 users × ~1 Mbps average = ~2.4 Gbps peak.  
 A server with a 10 Gbps NIC handles this easily. Disk I/O is the bottleneck —
-use SSDs for the `videos/hls/` directory.
+use SSDs for the `videos/` directory.
 
 ## Configuration
 
@@ -120,6 +130,9 @@ All settings are in `.env` (see `.env.example`):
 | `SHARE_PASSWORD` | *(none)* | HTTP Basic Auth password |
 | `LISTEN_PORT` | `80` | Docker: nginx listen port |
 | `HLS_TIME` | `6` | HLS segment length (seconds) |
+| `RTSP_ENABLED` | `true` | Publish cameras as live RTSP via MediaMTX |
+| `RTSP_PUBLISH_URL` | `rtsp://127.0.0.1:8554` | Where ffmpeg publishes (use `rtsp://mediamtx:8554` in Docker) |
+| `RTSP_PUBLIC_HOST` | `auto` | Host advertised in `rtsp_url` (`auto` = request Host) |
 
 ## API Endpoints
 
@@ -128,11 +141,21 @@ All settings are in `.env` (see `.env.example`):
 | GET | `/` | Dashboard |
 | GET | `/camera/{id}` | Full-screen camera player |
 | GET | `/api/cameras` | List all cameras |
-| GET | `/api/cameras/{id}/state` | Camera state + timing |
+| GET | `/api/cameras/{id}/state` | Camera state + timing + live URLs |
+| GET | `/api/ingest` | RTSP / WebRTC / live-HLS catalog for AI clients |
 | GET | `/api/prepare/status` | Background prep progress |
-| GET | `/hls/{slug}/index.m3u8` | HLS playlist (nginx-served) |
+| GET | `/live/stream/{id}/index.m3u8` | Live HLS (real-time, from MediaMTX) |
+| GET | `/hls/{slug}/index.m3u8` | VOD HLS playlist (fallback) |
 | GET | `/stream/{id}` | Progressive MP4 fallback |
 | GET | `/healthz` | Health check |
+
+Live ingest URLs (also returned by `/api/ingest`):
+
+| Protocol | URL |
+|----------|-----|
+| RTSP | `rtsp://<host>:8554/stream/<id>` |
+| WebRTC (WHEP) | `http://<host>:8889/stream/<id>/whep` |
+| HLS | `http://<host>/live/stream/<id>/index.m3u8` |
 
 ## Time Alignment
 

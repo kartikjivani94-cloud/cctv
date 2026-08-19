@@ -1,5 +1,27 @@
 services:
-  # ---------- FastAPI application (API + auto-prepare) ----------
+  # ---------- Live RTSP / WebRTC / HLS gateway ----------
+  mediamtx:
+    image: bluenviron/mediamtx:1.20.1
+    container_name: cctv-mediamtx
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "8554:8554"       # RTSP (AI ingest: OpenCV / GStreamer / DeepStream)
+      - "8888:8888"       # Live HLS
+      - "8889:8889"       # WebRTC / WHEP
+      - "8189:8189/udp"   # WebRTC ICE
+      - "9997:9997"       # MediaMTX API
+    environment:
+      MTX_RTSPTRANSPORTS: tcp
+      MTX_WEBRTCADDITIONALHOSTS: "${RTSP_PUBLIC_HOST:-}"
+    deploy:
+      resources:
+        limits:
+          cpus: "${MTX_CPUS:-1.0}"
+          memory: "${MTX_MEM:-512M}"
+
+  # ---------- FastAPI application (API + auto-prepare + ffmpeg publishers) ----------
   app:
     build: .
     image: cctv-live-feed:latest
@@ -11,9 +33,15 @@ services:
       WORKERS: "${WORKERS:-4}"
       VIDEOS_DIR: /data/videos
       LIBRARY_CACHE_FILE: /data/cache/library.json
+      RTSP_ENABLED: "true"
+      RTSP_PUBLISH_URL: rtsp://mediamtx:8554
+      HLS_LIVE_ORIGIN: http://mediamtx:8888
+      RTSP_PUBLIC_HOST: "${RTSP_PUBLIC_HOST:-auto}"
     volumes:
       - ./videos:/data/videos
       - ./cache:/data/cache
+    depends_on:
+      - mediamtx
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
@@ -40,6 +68,8 @@ services:
     depends_on:
       app:
         condition: service_healthy
+      mediamtx:
+        condition: service_started
     deploy:
       resources:
         limits:

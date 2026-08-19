@@ -8,6 +8,7 @@ import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -17,6 +18,7 @@ from .autoprepare import AutoPreparer
 from .config import get_settings
 from .library import scan_library
 from .routes import router
+from .rtsp import RtspGateway
 from .timefeed import FeedClock
 
 logging.basicConfig(
@@ -79,7 +81,17 @@ async def lifespan(app: FastAPI):
                      os.environ.get("CCTV_WORKER_ID"))
     app.state.preparer = preparer
 
-    yield
+    rtsp = RtspGateway(settings, clock, lambda: app.state.cameras)
+    if not settings.single_preparer or is_worker_zero:
+        rtsp.start()
+    app.state.rtsp = rtsp
+    app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=30.0), follow_redirects=True)
+
+    try:
+        yield
+    finally:
+        rtsp.stop()
+        await app.state.http.aclose()
 
 
 def _add_basic_auth(app: FastAPI, username: str, password: str) -> None:
@@ -105,7 +117,7 @@ def _add_basic_auth(app: FastAPI, username: str, password: str) -> None:
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="CCTV Live-Feed Simulator", version="2.0.0", lifespan=lifespan)
+    app = FastAPI(title="CCTV Live-Feed Simulator", version="3.0.0", lifespan=lifespan)
 
     if settings.auth_enabled:
         _add_basic_auth(app, settings.share_username, settings.share_password)

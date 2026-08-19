@@ -1,0 +1,43 @@
+###############################################
+# MediaMTX — live RTSP / WebRTC / HLS gateway
+###############################################
+# Static MP4 files are published here by ffmpeg -re (see app/rtsp.py).
+# AI clients pull RTSP; browsers pull HLS (/live/...) or WebRTC (:8889).
+
+logLevel: info
+logDestinations: [stdout]
+
+rtspAddress: :8554
+# TCP is reliable behind NAT/Docker. UDP remains available for LAN clients.
+rtspTransports: [tcp, udp]
+
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsAllowOrigin: "*"
+
+webrtcAddress: :8889
+webrtcICEUDPMuxAddress: :8189
+webrtcAllowOrigin: "*"
+
+api: yes
+apiAddress: :9997
+
+# Open sandbox: any client may publish or read. Tighten for production.
+authInternalUsers:
+  - user: any
+    pass: ""
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+
+paths:
+  all_others:
+    source: publisher
+    # Keep the path alive across brief ffmpeg restarts (slot resync).
+    sourceOnDemand: no
